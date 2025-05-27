@@ -1,0 +1,519 @@
+---
+title: "frafi_final_ecoli"
+output: 
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load dataset
+```{r load data}
+#load packages to load and read data from excel retrieved from GSE site
+library(readxl)
+library(dplyr)
+
+## load RNAseq raw counts into dataframe "data"
+data= read_excel("GSE215300_Feature_counts_all_lib.xlsx")
+head(data)
+```
+```{r clean data}
+
+## populate counts dataframe with raw counts from data df and 
+## set row name of counts as the gene_id
+counts <- data.frame(data, row.names = data$`gene id`)
+head(counts)
+
+## remove gene_id columns (redundant since now rownames) and 
+## remove additional control data labeled K4 (at columns 10,11)
+## ensures 3 replicates per sample
+counts <- counts[,-c(1,10,11)]
+head(counts)
+```
+
+```{r}
+## create sampledata df to show each sample type (describe condition and 
+## library prep of sample) 
+
+##create sampledata with nrow as number of samples and populate with NA
+##name rows as the name of samples (columns name of counts)
+sampleData= data.frame(condition=matrix(NA, nrow=ncol(counts)))
+row.names(sampleData)= colnames(counts)
+
+##label condition (antibiotic) of samples accordingly
+##Nb -novobiocin, Rif-rifampicin, Tet-tetracycline
+sampleData$condition= ifelse(grepl("Nb", row.names(sampleData)), "novobiocin", 
+                             ifelse(grepl("Rif", row.names(sampleData)),"rifampicin",
+                                  ifelse(grepl("Tet", row.names(sampleData)), 
+                                         "tetracycline",  "control")))
+
+## label library prep of sample accordingly 
+## Ultra, VCE or VCE-enriched
+sampleData$library= ifelse(grepl("Ultra", row.names(sampleData)), "ultra", 
+                           ifelse(grepl("VCEe", row.names(sampleData)), "enr","VCE"))
+
+head(sampleData)
+```
+
+#Deseq obj
+```{r load Deseq}
+## install and load DESeq2 and related package
+library(BiocManager)
+library(DESeq2)
+library(RCurl)
+library(GenomeInfoDb)
+```
+
+```{r DESeq obj}
+## create deseq object:
+## define count dataset matrix (cds) with command DESeqDataSetFromMatrix 
+## using readcount and expgroup and design indicating 
+## the two dataframes are dependent/related on the condition factor
+
+cds= DESeqDataSetFromMatrix(counts, sampleData, design= ~ condition)
+cds
+```
+
+```{r estimates}
+## normalize deseq object cds size factors with command estimateSizeFactors
+## by comparing difference in reads across samples
+## estimate dispersion of data with command estimateDispersions on cds
+cds=estimateSizeFactors(cds)
+cds=estimateDispersions(cds)
+cds
+
+## plot the dispersion (variation of sample data)
+plotDispEsts(cds)
+
+```
+```{r runDESeq}
+## perform DeSeq
+cds=DESeq(cds)
+```
+```{r}
+results(cds)
+```
+```{r PCA}
+
+##variance stabilizing transformation
+vsd <- vst(cds, blind = FALSE)
+
+#PCA plot
+plotPCA(vsd, intgroup = "condition")
+
+```
+
+
+## DESeq results
+```{r tet-res}
+## Deseq2 results of tet vs control samples 
+tet= results(cds, name="condition_tetracycline_vs_control")
+head(tet)
+```
+```{r nov-res}
+##Deseq2 results of nov vs control samples 
+nov<- results(cds, name="condition_novobiocin_vs_control")
+head(nov)
+```
+```{r rif-res}
+##Deseq2 results of rif vs control samples 
+rif<- results(cds, name="condition_rifampicin_vs_control")
+head(rif)
+```
+```{r more-res}
+##Deseq2 results of antibiotic against antibiotic samples: 
+##combinations observed here are rif vs tet, tet vs nov, and nov vs rif
+
+rt=results(cds, c("condition", "rifampicin", "tetracycline"))
+tn=results(cds, c("condition", "tetracycline", "novobiocin"))
+nr=results(cds, c("condition", "novobiocin", "rifampicin"))
+
+```
+
+
+```{r diffexp}
+## using tet vs control gene set
+
+## define diff exp genes degs as rows which have values in padj col < 0.05
+## and have values in log2Foldchange col that are greater than 1 or less than -1
+
+tet_deg= data.frame(tet[which(tet$padj <0.05 & (tet$log2FoldChange < -1 |
+                                                       tet$log2FoldChange > 1)),])
+head(tet_deg)
+```
+
+```{r normalize}
+## define normvalues as the normalized count data of cds using counts command
+normvalues=counts(cds, normalized=T)
+head(normvalues)
+```
+```{r diffvalues}
+## using tet vs control gene set
+
+## define diff exp values dev dataframe which are the normalized count data of
+## the DEGs using the rownames of diffexpgene dataframe
+
+tet_dev= data.frame(normvalues[row.names(tet_deg),])
+head(tet_dev)
+```
+DEGs functional enrichment Analysis
+
+## convert GenBank ID to EntrezID
+```{r}
+#load packages rentrez
+#install.packages("rentrez")
+library(rentrez)
+```
+
+```{r converttoEntrez}
+## using tet vs control gene set
+
+## Function to fetch Entrez IDs from GenBank IDs
+## use entrez_search command with given genbank ID and 
+## return corresponding entrezID
+fetch_entrez_ids <- function(genbank_ids) {
+  entrez_ids <- sapply(genbank_ids, function(gb_id) {
+    search_result <- entrez_search(db="gene", term=gb_id)
+    if (length(search_result$ids) > 0) {
+      return(search_result$ids[1])
+    } else {
+      return(NA)
+    }
+  })
+  return(entrez_ids)
+}
+
+# Define GenBank IDs
+genbank_ids <- row.names(tet_deg) 
+
+## use fetch_entrez_ids function with input genbank_ids to get entrez ids 
+## takes some time to retrieve! 
+entrez_ids <- fetch_entrez_ids(genbank_ids)
+
+# get list of entrez ids in dataframe entrez_id_values
+entrez_ids_values <- data.frame(entrez_ids)
+head(entrez_ids_values)
+```
+
+```{r remove duplicates}
+## using tet vs control gene set
+
+## Find duplicated Entrez IDs (with each occurences excluding the first)
+(entrez_ids_values[duplicated(entrez_ids_values),])
+
+## with outputted duplicated entrez id, can search entrez_id_values dataframe 
+## for that entrez ID and can check the GenbankID (row-name) of origin
+## make vector of the GenbankID resulting in duplicate entrez id (excluding first)
+dup_genid=c("b2703","b2707")
+
+## remove genbank ids of dup_geneid from diff exp gene df deg, 
+## diff exp values df dev, and entrez_id_values df
+tet_deg=tet_deg[!(row.names(tet_deg) %in% dup_genid),]
+tet_dev=tet_dev[!(row.names(tet_dev) %in% dup_genid),]
+entrez_ids_values=entrez_ids_values[!(row.names(entrez_ids_values) %in% dup_genid),]
+
+```
+```{r up-downreg}
+# Filter for up/down-regulated genes
+tet_up <- subset(tet_deg, log2FoldChange > 0 & padj < 0.05)
+tet_down <- subset(tet_deg, log2FoldChange < 0 & padj < 0.05)
+
+```
+
+```{r}
+##loaad packages to visualize DEGs 
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("pathview")
+#BiocManager::install("enrichplot")
+
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+
+##install E.coli genome wide annotation data
+#BiocManager::install(organism, character.only = TRUE, force= T)
+organism = "org.EcK12.eg.db"
+library(organism, character.only = TRUE)
+```
+
+
+```{r}
+## using tet vs control gene set
+
+##get genelist which is the log2foldchange of the degs 
+##and give names accordingly with entrez ids
+##sort gene list from largest to smallest fold change -- needed for gse
+gene_list=(tet_deg$log2FoldChange)
+names(gene_list) = entrez_ids_values
+#head(gene_list)
+gene_list = sort(gene_list, decreasing = TRUE)
+head(gene_list)
+```
+
+```{r GOterm}
+## using tet vs control gene set
+
+##get GO terms with gseGO command with input gene_list
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "ENTREZID", 
+             nPerm = 10000, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = organism, 
+             pAdjustMethod = "none")
+
+head(gse)
+```
+```{r fig.height=8}
+## using tet vs control gene set
+
+require(DOSE)
+##dotplot of GOterms - visualize up/down regulated GO term
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+```
+
+```{r fig.width=15, fig.height=10}
+## using tet vs control gene set
+
+##emmapplot and cnetplot to visualize relation/interaction of GOterms 
+emapplot( pairwise_termsim(gse))
+cnetplot(gse, categorySize="pvalue", foldChange=gene_list, showCategory = 3)
+```
+```{r fig.height=8}
+## using tet vs control gene set
+
+##ridgeplot fot distribution of GO terms
+ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+
+
+```{r KEGG}
+## using tet vs control gene set
+
+## get pathways from KEGG with gseKEGG command and input gene_list 
+kk2 <- gseKEGG(geneList     = gene_list,
+               organism     = "eco",
+               nPerm        = 10000,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+head(kk2)
+```
+```{r fig.height=8}
+## using tet vs control gene set
+##dotplot of pathways - visualize up/down regulated GO term
+dotplot(kk2, showCategory = 10, title = "Enriched Pathways" , split=".sign") + facet_grid(.~.sign)
+```
+```{r fig.width=15, fig.height=10 }
+## using tet vs control gene set
+##emmapplot  to visualize relation/interaction of pathways 
+ emapplot( pairwise_termsim(kk2))
+
+```
+
+```{r workflow}
+## analysis workflow with nov vs control ansd rif vs control samples
+
+## nov vs control
+##get diffexpgenes and diffexpvalues from deseq cds results
+nov_deg= data.frame(nov[which(nov$padj <0.05 & (nov$log2FoldChange < -1 | 
+                                              nov$log2FoldChange > 1)),])
+#head(nov_deg)
+nov_dev= data.frame(normvalues[row.names(nov_deg),])
+#head(nov_dev)
+
+#genebank to entrez convert
+nov_gids <- row.names(nov_deg) 
+nov_eids <- fetch_entrez_ids(nov_gids)
+nov_eiv <- data.frame(nov_eids)
+head(nov_eiv)
+#find duplicates
+(nov_eiv[duplicated(nov_eiv),])
+## no duplicates found
+# Filter for up/down-regulated genes
+nov_up <- subset(nov_deg, log2FoldChange > 0 & padj < 0.05)
+nov_down <- subset(nov_deg, log2FoldChange < 0 & padj < 0.05)
+
+## rif vs control:
+##get diffexpgenes and diffexpvalues from deseq cds results
+rif_deg= data.frame(rif[which(rif$padj <0.05 & (rif$log2FoldChange < -1 | 
+                                              rif$log2FoldChange > 1)),])
+#head(rif_deg)
+rif_dev= data.frame(normvalues[row.names(rif_deg),])
+#head(rif_dev)
+
+#genbank to entrez convert
+rif_gids <- row.names(rif_deg) 
+rif_eids <- fetch_entrez_ids(rif_gids)
+rif_eiv <- data.frame(rif_eids)
+head(rif_eiv)
+#find duplicates
+(rif_eiv[duplicated(rif_eiv),])
+#no duplicated found
+# Filter for up/down-regulated genes
+rif_up <- subset(rif_deg, log2FoldChange > 0 & padj < 0.05)
+rif_down <- subset(rif_deg, log2FoldChange < 0 & padj < 0.05)
+
+
+##for GSE and graph visualization, used code at bottom (full workflow  ) 
+```
+
+##Clustering
+```{r cluster}
+
+## get diff exp values of all degs across samples 
+all_dev= rbind(tet_dev, nov_dev, rif_dev)
+
+## define distance matrix 
+## hierarchical clustering of DEGs vals from diffexpvalues using hclust 
+## and define as clust
+## plot clust dendogram
+dist=as.dist(1 - cor(t(all_dev)))
+clust= hclust(dist, method = "ward.D2")
+plot(clust)
+summary(clust)
+
+## see height of dendograph to choose number of clusters k
+## and cluster with cutree command (ct)
+ct=cutree(clust, k=5)
+
+## view cluster groups with table 
+table(ct)
+```
+```{r heatmap}
+## using tet vs control gene set
+
+##load heatmap library
+library(pheatmap)
+
+## define annrow dataframe with values from ct to indicate which group cluster
+## each gene is in. Use rownames of the DEGs in diffexpvalue to name genes (row) 
+ann_row= data.frame(cluster=ct)
+row.names(ann_row)=row.names(all_dev)
+
+## create heatmap using command pheatmap with diffexpvalue dev
+## scale data by genes (rows), cluster rows by hierarchical clustering in clust
+## define annotation_col with expgroup to reflect condition of samples
+## define annotation_row with ann_row to reflect grouping of genes 
+pheatmap(all_dev, scale="row", cluster_rows=clust, 
+         clustering_distance_rows = "correlation", 
+         annotation_col=sampleData, annotation_row=ann_row, 
+         show_rownames = F)
+
+```
+
+##Venn diagram
+```{r venn plot}
+## install packages for venn diagram
+#BiocManager::install("VennDiagram")
+library(VennDiagram)
+library(grid)
+
+# Venn diagaram for up and down regulated genes of Tet, Nov, and Rif samples
+venn.diagram(x= list(Tet=row.names(tet_up), Nov=row.names(nov_up), 
+                     Rif=row.names(rif_up)),                       
+             category.names = c("Tet", "Nov","Rif"), output = TRUE,
+             filename="up_venn.png", fill = c("blue", "red", "green"),
+             alpha = 0.5, cex = 2, cat.cex = 2 )
+
+venn.diagram(x= list(Tet=row.names(tet_down), Nov=row.names(nov_down), 
+                     Rif=row.names(rif_down)),                       
+             category.names = c("Tet", "Nov","Rif"), output = TRUE,
+             filename="down_venn.png", fill = c("blue", "red", "green"),
+             alpha = 0.5, cex = 2, cat.cex = 2 )
+```
+
+## entire workflow
+## used with antibioitc v antibiotic group comparison 
+## as well as generating graph visualizions of nov and rif degs 
+```{r fig.height=10}
+
+## entire workflow to use with other sample comparisons analysis
+## everything commented out to knit file!
+
+## db vector for antibiotics vs antibiotic comparisons
+## use to i to define a result set and utilize in workflow below
+
+#db= c(nov, rif, rt, nr, tn)
+#i=nov
+
+## deg and dev of i group comparison
+#deg= data.frame(i[which(i$padj <0.05 & (i$log2FoldChange < -1 | 
+                                          #i$log2FoldChange > 1)),])
+#head(deg)
+#dev= data.frame(normvalues[row.names(deg),])
+#head(dev)
+
+## clustering
+#dist=as.dist(1 - cor(t(dev)))
+#clust= hclust(dist, method = "ward.D2")
+#summary(clust)
+#plot(clust)
+#ct=cutree(clust, k=10)
+#table(ct)
+
+## heatmap
+#ann_row= data.frame(cluster=ct)
+#row.names(ann_row)=row.names(dev)
+#pheatmap(dev, scale="row", cluster_rows=clust, annotation_col=sampleData,
+ #        clustering_distance_rows = "correlation",
+  #       annotation_row=ann_row, show_rownames = F)
+
+## genbank to entrez convert -- takes time to fetch entrez ids
+#gids <- row.names(deg) 
+#eids <- fetch_entrez_ids(gids)
+#eiv <- data.frame(eids)
+#head(eiv)
+
+## find duplicates
+#(eiv[duplicated(eiv),])
+#dup=c("b2703", "b2705")
+#deg=deg[!(row.names(deg) %in% dup),]
+#dev=dev[!(row.names(dev) %in% dup),]
+#eiv=eiv[!(row.names(eiv) %in% dup),]
+
+## gse 
+#gene_list=list(NA)
+#gene_list=(deg$log2FoldChange)
+#head(gene_list)
+#names(gene_list) = eiv
+#head(gene_list)
+#gene_list = sort(gene_list, decreasing = TRUE)
+
+## GOterm
+#gse <- gseGO(geneList=gene_list, 
+#             ont ="ALL", 
+ #            keyType = "ENTREZID", 
+  #           nPerm = 10000, 
+   #          pvalueCutoff = 0.05, 
+    #         verbose = TRUE, 
+     #        OrgDb = organism, 
+      #       pAdjustMethod = "none")
+
+#head(gse)
+
+## plots
+#require(DOSE)
+#dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+#emapplot( pairwise_termsim(gse))
+#cnetplot(gse, categorySize="pvalue", foldChange=gene_list, showCategory = 3)
+
+## KEGG and plot
+#kk2 <- gseKEGG(geneList     = gene_list,
+ #              organism     = "eco",
+  #             nPerm        = 10000,
+   #            pvalueCutoff = 0.05,
+    #           pAdjustMethod = "none",
+     #          keyType       = "ncbi-geneid")
+#head(kk2)
+#dotplot(kk2, showCategory = 10, title = "Enriched Pathways" , split=".sign") +
+  #facet_grid(.~.sign)
+#emapplot( pairwise_termsim(kk2))
+
+
+```
+
+
