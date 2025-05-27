@@ -25,5 +25,5 @@ Key R packages:
 - `DESeq2`
 - `ggplot2`
 - `pheatmap`
-- `EnhancedVolcano` (optional)
+- `EnhancedVolcano` 
 
